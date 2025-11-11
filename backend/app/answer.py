@@ -57,7 +57,7 @@ class AnswerQuery(BaseModel):
 class IndexDatasetRequest(BaseModel):
     org: str
     uid: str
-    limit_rows: int = 5000
+    limit_rows: int = 20000
 
 def _vec_literal(vec: list[float]) -> str:
     """Convert Python list -> SQL vector literal for pgvector."""
