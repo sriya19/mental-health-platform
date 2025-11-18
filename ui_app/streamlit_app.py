@@ -16,6 +16,13 @@ from typing import Optional, Dict, Any, List
 import json
 from openai import OpenAI
 
+# LIDA for AI-powered visualizations
+try:
+    from lida import Manager, llm
+    HAVE_LIDA = True
+except ImportError:
+    HAVE_LIDA = False
+
 # Load environment variables from .env file
 from dotenv import load_dotenv
 from pathlib import Path
@@ -179,6 +186,7 @@ def load_existing_datasets():
 def analyze_dataset_with_ai(df: pd.DataFrame, dataset_name: str) -> Dict[str, Any]:
     """
     Use AI to analyze the dataset and suggest meaningful visualizations
+    Enhanced version with better statistical analysis
     """
     try:
         # Initialize OpenAI client
@@ -188,102 +196,339 @@ def analyze_dataset_with_ai(df: pd.DataFrame, dataset_name: str) -> Dict[str, An
 
         client = OpenAI(api_key=api_key)
 
-        # Prepare dataset summary for AI
+        # Prepare comprehensive dataset summary for AI
         summary = {
             "name": dataset_name,
-            "shape": f"{df.shape[0]} rows × {df.shape[1]} columns",
+            "shape": f"{df.shape[0]:,} rows × {df.shape[1]} columns",
+            "memory_usage_mb": round(df.memory_usage(deep=True).sum() / 1024 / 1024, 2),
             "columns": []
         }
 
-        # Add column information
-        for col in df.columns[:30]:  # Limit to first 30 columns
+        # Identify column types
+        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()
+        datetime_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
+
+        # Prioritize important columns (those with reasonable cardinality and less nulls)
+        important_cols = []
+        for col in df.columns:
+            null_pct = (df[col].isnull().sum() / len(df)) * 100
+            unique_count = df[col].nunique()
+            if null_pct < 50 and (unique_count > 1 or col in numeric_cols):  # Skip constant columns
+                important_cols.append((col, null_pct, unique_count))
+
+        # Sort by null percentage (prefer columns with less nulls)
+        important_cols.sort(key=lambda x: (x[1], -x[2]))
+        important_cols = [col[0] for col in important_cols[:40]]  # Limit to top 40 important columns
+
+        # Add detailed column information
+        for col in important_cols:
             col_info = {
                 "name": col,
                 "type": str(df[col].dtype),
-                "sample_values": []
+                "null_percentage": round((df[col].isnull().sum() / len(df)) * 100, 2),
+                "unique_count": int(df[col].nunique())
             }
 
-            # Add sample values (avoid unhashable types)
+            # Add statistics for numeric columns
+            if col in numeric_cols:
+                try:
+                    col_info["statistics"] = {
+                        "min": float(df[col].min()),
+                        "max": float(df[col].max()),
+                        "mean": float(df[col].mean()),
+                        "median": float(df[col].median()),
+                        "std": float(df[col].std())
+                    }
+                    # Check for outliers
+                    Q1 = df[col].quantile(0.25)
+                    Q3 = df[col].quantile(0.75)
+                    IQR = Q3 - Q1
+                    outliers = ((df[col] < (Q1 - 1.5 * IQR)) | (df[col] > (Q3 + 1.5 * IQR))).sum()
+                    col_info["outliers_count"] = int(outliers)
+                except:
+                    col_info["statistics"] = "Could not calculate"
+
+            # Add sample values (more representative)
             try:
                 non_null = df[col].dropna()
                 if len(non_null) > 0:
-                    # Get up to 5 sample values
-                    samples = non_null.head(5).tolist()
-                    # Convert to string if necessary
+                    # Get diverse samples (from beginning, middle, end)
+                    sample_indices = [0, len(non_null)//4, len(non_null)//2, 3*len(non_null)//4, len(non_null)-1]
+                    samples = [non_null.iloc[min(i, len(non_null)-1)] for i in sample_indices if i < len(non_null)]
                     col_info["sample_values"] = [str(s)[:100] for s in samples]
-                    col_info["unique_count"] = int(df[col].nunique()) if df[col].nunique() < 10000 else "10000+"
+
+                    # For categorical columns, show top categories
+                    if col in categorical_cols and col_info["unique_count"] < 100:
+                        top_categories = df[col].value_counts().head(10)
+                        col_info["top_categories"] = [
+                            {"value": str(k)[:50], "count": int(v)}
+                            for k, v in top_categories.items()
+                        ]
             except:
                 col_info["sample_values"] = ["Complex type"]
 
             summary["columns"].append(col_info)
 
-        # Create prompt for AI
-        prompt = f"""Analyze this dataset and suggest the 3-5 most meaningful visualizations.
+        # Add correlation info for numeric columns
+        if len(numeric_cols) >= 2:
+            try:
+                corr_matrix = df[numeric_cols].corr()
+                # Find strongest correlations (excluding diagonal)
+                strong_corr = []
+                for i in range(len(corr_matrix.columns)):
+                    for j in range(i+1, len(corr_matrix.columns)):
+                        corr_val = corr_matrix.iloc[i, j]
+                        if abs(corr_val) > 0.5:  # Strong correlation
+                            strong_corr.append({
+                                "col1": corr_matrix.columns[i],
+                                "col2": corr_matrix.columns[j],
+                                "correlation": round(float(corr_val), 3)
+                            })
+                if strong_corr:
+                    summary["strong_correlations"] = sorted(strong_corr, key=lambda x: abs(x["correlation"]), reverse=True)[:5]
+            except:
+                pass
 
-Dataset: {dataset_name}
+        # Create enhanced prompt for AI
+        prompt = f"""You are an expert data analyst specializing in public health and mental health data visualization. Analyze this dataset and recommend 3-5 high-quality, meaningful visualizations.
+
+**Dataset Information:**
+Name: {dataset_name}
 Shape: {summary['shape']}
+Memory: {summary.get('memory_usage_mb', 'N/A')} MB
 
-Columns:
+**Detailed Column Analysis:**
 {json.dumps(summary['columns'], indent=2)}
 
-Please provide:
-1. A brief analysis of what this dataset represents
-2. 3-5 specific visualization recommendations with:
-   - Chart type (histogram, bar, line, scatter, heatmap, box, pie)
-   - Which column(s) to use
-   - For heatmaps: specify x_column (e.g., year), y_column (e.g., state/category), and optionally value_column (numeric metric to display)
-   - Why this visualization is meaningful
-   - What insights it reveals
-3. Key patterns or insights you notice in the data
+**Correlation Analysis:**
+{json.dumps(summary.get('strong_correlations', []), indent=2) if summary.get('strong_correlations') else 'No strong correlations found'}
 
-Chart type guidance:
-- histogram: Distribution of single numeric variable
-- bar: Compare categories or groups
-- line: Show trends over time
-- scatter: Show relationship between two numeric variables
-- heatmap: Show patterns across two categorical/ordinal dimensions with a numeric value (great for geographic + temporal data)
-- box: Show statistical distribution and outliers
-- pie: Show proportions (use sparingly)
+**Your Task:**
+1. Analyze the dataset structure, data types, distributions, and correlations
+2. Identify the most important and insightful columns based on:
+   - Data quality (low null percentage)
+   - Statistical properties (good variance, interesting distributions)
+   - Public health relevance
+3. Recommend 3-5 SPECIFIC visualizations that:
+   - Use columns that actually exist and have good data quality
+   - Tell a clear story about mental health patterns
+   - Are appropriate for the data types
+   - Provide actionable insights
+   - Avoid columns with >20% nulls unless critically important
 
-Format your response as JSON:
+**Chart Selection Rules:**
+- **histogram**: Single numeric variable distribution (e.g., age distribution, prevalence rates)
+  * Use when: Showing frequency distribution
+  * Require: One numeric column with low nulls
+
+- **bar**: Compare categories (e.g., prevalence by state, by demographic)
+  * Use when: Comparing discrete groups
+  * Require: One categorical column (x_column), optionally one numeric for aggregation (y_column)
+
+- **line**: Time trends (e.g., rates over years, monthly patterns)
+  * Use when: Data has time/sequential dimension
+  * Require: Time/sequential column (x_column), numeric metric (y_column)
+
+- **scatter**: Relationship between two numeric variables (e.g., correlation between prevalence and poverty)
+  * Use when: Exploring correlations
+  * Require: Two numeric columns with good variance
+
+- **heatmap**: Geographic/categorical patterns (e.g., state × year, demographic × condition)
+  * Use when: Showing patterns across 2 dimensions
+  * Require: Two categorical columns (x_column, y_column), numeric value (value_column)
+  * Best for: 5-30 categories per dimension
+
+- **box**: Distribution comparison (e.g., age distribution across groups)
+  * Use when: Comparing distributions or detecting outliers
+  * Require: Numeric column, optionally categorical for grouping
+
+**Validation Checklist (verify before recommending):**
+✓ Column exists in dataset
+✓ Column has <20% null values (unless critical)
+✓ Numeric columns have variance (not constant)
+✓ Categorical columns have 2-100 unique values
+✓ Recommended aggregation makes sense
+✓ Chart type matches data types
+
+**Response Format (JSON only):**
 {{
-  "analysis": "Brief description of the dataset",
+  "analysis": "2-3 sentence summary: what this dataset represents and its public health significance",
   "visualizations": [
     {{
-      "chart_type": "bar",
-      "x_column": "column_name",
-      "y_column": "column_name" (optional for some chart types),
-      "value_column": "numeric_column" (optional, for heatmaps),
-      "title": "Chart title",
-      "description": "What this shows and why it matters",
-      "insight": "Key insight from this visualization"
+      "chart_type": "bar|line|scatter|histogram|heatmap|box",
+      "x_column": "exact_column_name_from_dataset",
+      "y_column": "exact_column_name_if_needed",
+      "value_column": "numeric_column_for_heatmaps_only",
+      "title": "Clear, specific title (e.g., 'Depression Prevalence by Age Group, 2020-2023')",
+      "description": "What this visualization shows and why it's important for understanding mental health patterns",
+      "insight": "Specific, actionable insight this reveals (e.g., '25-34 age group shows 40% higher rates than average')"
     }}
   ],
-  "key_insights": ["insight 1", "insight 2", "insight 3"]
-}}"""
+  "key_insights": [
+    "Specific observation 1 with numbers/trends",
+    "Specific observation 2 with patterns",
+    "Specific observation 3 with implications"
+  ],
+  "data_quality_notes": "Brief note on any data limitations (high nulls, limited time range, etc.)"
+}}
 
-        # Call OpenAI API
+**CRITICAL REQUIREMENTS (DO NOT SKIP):**
+- EVERY visualization MUST have "chart_type" and "x_column" fields - NO EXCEPTIONS
+- ONLY use columns that exist in the provided column list
+- Prioritize columns with low null_percentage
+- For heatmaps, ensure both dimensions have reasonable cardinality (5-30 categories)
+- All insights must be data-driven and specific
+- Focus on mental health relevance
+- If you cannot create a complete visualization specification, DO NOT include it
+- Better to return 3 complete visualizations than 5 incomplete ones"""
+
+        # Call OpenAI API with improved settings
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a data analyst expert specializing in health and public policy data. Provide practical, actionable visualization recommendations."},
+                {"role": "system", "content": "You are a senior data analyst and public health researcher with expertise in mental health epidemiology, data visualization, and statistical analysis. You provide precise, evidence-based visualization recommendations that reveal meaningful patterns in public health data. You always validate that your recommendations match the actual data structure."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
-            max_tokens=2000,
+            temperature=0.3,  # Lower temperature for more consistent, focused results
+            max_tokens=2500,  # More tokens for detailed analysis
             response_format={"type": "json_object"}
         )
 
         # Parse response
         result = json.loads(response.choices[0].message.content)
+
+        # Validate and filter visualizations - ensure all have required fields
+        if "visualizations" in result:
+            valid_vizs = []
+            for viz in result["visualizations"]:
+                # Check required fields
+                if viz.get("chart_type") and viz.get("x_column"):
+                    valid_vizs.append(viz)
+                else:
+                    print(f"[AI] Skipping incomplete visualization: {viz.get('title', 'Unknown')} - missing chart_type or x_column")
+
+            result["visualizations"] = valid_vizs
+            print(f"[AI] Validated {len(valid_vizs)} out of {len(result.get('visualizations', []))} visualizations")
+
         return result
 
     except Exception as e:
         return {"error": str(e)}
 
+def generate_with_lida(df: pd.DataFrame, dataset_name: str, api_key: str) -> Dict[str, Any]:
+    """
+    Use Microsoft LIDA to generate AI-powered visualizations
+    Returns goals and charts generated by LIDA
+    """
+    try:
+        if not HAVE_LIDA:
+            return {"error": "LIDA library not installed. Please run: pip install lida"}
+
+        # Initialize LIDA with OpenAI
+        lida = Manager(text_gen=llm("openai", api_key=api_key))
+
+        # Step 1: Summarize the dataset
+        summary = lida.summarize(df, summary_method="default")
+
+        # Step 2: Generate visualization goals
+        goals = lida.goals(summary, n=5)  # Generate 5 goals
+
+        return {
+            "summary": summary,
+            "goals": goals,
+            "success": True
+        }
+
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+def create_lida_chart(df: pd.DataFrame, summary: Dict, goal: Any, api_key: str):
+    """
+    Create a chart using LIDA based on a selected goal
+    """
+    try:
+        if not HAVE_LIDA:
+            st.error("LIDA library not installed")
+            return
+
+        # Initialize LIDA
+        lida = Manager(text_gen=llm("openai", api_key=api_key))
+
+        # Generate visualizations for this goal
+        try:
+            charts = lida.visualize(
+                summary=summary,
+                goal=goal,
+                library="plotly"
+            )
+        except Exception as viz_error:
+            st.error(f"Error during visualization generation: {str(viz_error)}")
+            st.info("Try using the AI-Powered Analysis above instead, or check if the dataset is suitable for LIDA.")
+            return
+
+        if charts and len(charts) > 0:
+            for i, chart in enumerate(charts, 1):
+                try:
+                    # Handle both dict and object formats
+                    if isinstance(chart, dict):
+                        chart_code = chart.get('code', '')
+                        # Debug: show what keys are in the dict
+                        if not chart_code:
+                            st.warning(f"Chart {i}: No code found. Available keys: {list(chart.keys())}")
+                            continue
+                    else:
+                        chart_code = getattr(chart, 'code', '') if hasattr(chart, 'code') else ''
+                        if not chart_code:
+                            st.warning(f"Chart {i}: No code attribute found. Type: {type(chart)}")
+                            continue
+
+                    if chart_code:
+                        st.markdown(f"#### Chart {i}")
+
+                        # Show code in expander
+                        with st.expander("View generated code"):
+                            st.code(chart_code, language="python")
+
+                        # Execute the code to generate the chart
+                        try:
+                            # Create a namespace with required imports
+                            namespace = {
+                                'pd': pd,
+                                'px': px,
+                                'go': go,
+                                'data': df
+                            }
+
+                            # Execute the LIDA-generated code
+                            exec(chart_code, namespace)
+
+                            # Get the figure from namespace and display it
+                            if 'chart' in namespace:
+                                st.plotly_chart(namespace['chart'], use_container_width=True)
+                            elif 'fig' in namespace:
+                                st.plotly_chart(namespace['fig'], use_container_width=True)
+                            else:
+                                st.warning("Chart generated but could not be displayed")
+
+                        except Exception as e:
+                            st.error(f"Error rendering chart: {str(e)}")
+                            st.info("The code was generated but couldn't be executed. Check the code above.")
+
+                except Exception as chart_error:
+                    st.error(f"Error processing chart {i}: {str(chart_error)}")
+                    continue
+        else:
+            st.warning("No charts were generated for this goal")
+
+    except Exception as e:
+        st.error(f"Error creating LIDA chart: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc(), language="python")
+
 def create_ai_chart(df: pd.DataFrame, viz_config: Dict[str, Any]):
     """
-    Create a chart based on AI recommendations
+    Create a chart based on AI recommendations with enhanced validation and error handling
     """
     try:
         chart_type = viz_config.get("chart_type", "").lower()
@@ -293,51 +538,148 @@ def create_ai_chart(df: pd.DataFrame, viz_config: Dict[str, Any]):
 
         # Validate columns exist
         if x_col and x_col not in df.columns:
-            st.warning(f"Column '{x_col}' not found in dataset")
+            st.error(f"❌ Column '{x_col}' not found in dataset. Available columns: {', '.join(df.columns[:10])}")
             return
 
         if y_col and y_col not in df.columns:
-            st.warning(f"Column '{y_col}' not found in dataset")
+            st.error(f"❌ Column '{y_col}' not found in dataset. Available columns: {', '.join(df.columns[:10])}")
             return
+
+        # Check for data quality issues
+        if x_col:
+            null_pct_x = (df[x_col].isnull().sum() / len(df)) * 100
+            if null_pct_x > 50:
+                st.warning(f"⚠️ Column '{x_col}' has {null_pct_x:.1f}% null values. Chart may be incomplete.")
+
+        if y_col:
+            null_pct_y = (df[y_col].isnull().sum() / len(df)) * 100
+            if null_pct_y > 50:
+                st.warning(f"⚠️ Column '{y_col}' has {null_pct_y:.1f}% null values. Chart may be incomplete.")
 
         # Create the chart
         if chart_type == "histogram":
             if HAVE_PLOTLY and x_col:
-                fig = px.histogram(df.dropna(subset=[x_col]), x=x_col, title=title)
-                st.plotly_chart(fig, use_container_width=True)
+                clean_data = df[x_col].dropna()
+
+                # Check if numeric
+                if pd.api.types.is_numeric_dtype(clean_data):
+                    fig = px.histogram(
+                        df.dropna(subset=[x_col]),
+                        x=x_col,
+                        title=title,
+                        nbins=min(50, max(10, int(len(clean_data) / 100)))
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Show distribution statistics
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Mean", f"{clean_data.mean():.2f}")
+                    col2.metric("Median", f"{clean_data.median():.2f}")
+                    col3.metric("Std Dev", f"{clean_data.std():.2f}")
+                    col4.metric("Range", f"{clean_data.min():.1f} - {clean_data.max():.1f}")
+                else:
+                    # For categorical data, show value counts as bar chart
+                    counts = clean_data.value_counts().head(20)
+                    fig = px.bar(
+                        x=counts.index,
+                        y=counts.values,
+                        title=title,
+                        labels={'x': x_col, 'y': 'Count'}
+                    )
+                    fig.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption(f"📊 Showing top 20 out of {len(clean_data.unique())} unique values")
             else:
                 st.bar_chart(df[x_col].value_counts().head(20))
 
         elif chart_type == "bar":
             if x_col and y_col and HAVE_PLOTLY:
-                # Group and aggregate
-                grouped = df.groupby(x_col)[y_col].mean().sort_values(ascending=False).head(20)
-                fig = px.bar(x=grouped.index, y=grouped.values, title=title,
-                           labels={'x': x_col, 'y': f'Average {y_col}'})
-                st.plotly_chart(fig, use_container_width=True)
+                # Check if y_col is numeric
+                if pd.api.types.is_numeric_dtype(df[y_col]):
+                    # Group and aggregate numeric values
+                    grouped = df.groupby(x_col)[y_col].mean().sort_values(ascending=False).head(20)
+                    fig = px.bar(
+                        x=grouped.index,
+                        y=grouped.values,
+                        title=title,
+                        labels={'x': x_col, 'y': f'Average {y_col}'}
+                    )
+                    fig.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    # If y is not numeric, just do value counts of x
+                    counts = df[x_col].value_counts().head(20)
+                    fig = px.bar(
+                        x=counts.index,
+                        y=counts.values,
+                        title=title,
+                        labels={'x': x_col, 'y': 'Count'}
+                    )
+                    fig.update_layout(xaxis_tickangle=-45)
+                    st.plotly_chart(fig, use_container_width=True)
             elif x_col:
                 # Simple value counts
                 counts = df[x_col].value_counts().head(20)
                 if HAVE_PLOTLY:
-                    fig = px.bar(x=counts.index, y=counts.values, title=title)
+                    fig = px.bar(
+                        x=counts.index,
+                        y=counts.values,
+                        title=title,
+                        labels={'x': x_col, 'y': 'Count'}
+                    )
+                    fig.update_layout(xaxis_tickangle=-45)
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.bar_chart(counts)
 
         elif chart_type == "line":
             if x_col and y_col:
+                # Check if y is numeric
+                if not pd.api.types.is_numeric_dtype(df[y_col]):
+                    st.error(f"Line charts require numeric y-axis. Column '{y_col}' is {df[y_col].dtype}")
+                    return
+
                 grouped = df.groupby(x_col)[y_col].mean().sort_index()
                 if HAVE_PLOTLY:
-                    fig = px.line(x=grouped.index, y=grouped.values, title=title,
-                                labels={'x': x_col, 'y': y_col})
+                    fig = px.line(
+                        x=grouped.index,
+                        y=grouped.values,
+                        title=title,
+                        labels={'x': x_col, 'y': f'Average {y_col}'}
+                    )
+                    fig.update_traces(mode='lines+markers')
                     st.plotly_chart(fig, use_container_width=True)
+
+                    # Show trend statistics
+                    if len(grouped) > 1:
+                        pct_change = ((grouped.iloc[-1] - grouped.iloc[0]) / grouped.iloc[0] * 100) if grouped.iloc[0] != 0 else 0
+                        st.caption(f"📈 Trend: {pct_change:+.1f}% change from {grouped.index[0]} to {grouped.index[-1]}")
                 else:
                     st.line_chart(grouped)
 
         elif chart_type == "scatter":
             if x_col and y_col and HAVE_PLOTLY:
-                fig = px.scatter(df.dropna(subset=[x_col, y_col]), x=x_col, y=y_col, title=title)
+                # Check if both are numeric
+                if not pd.api.types.is_numeric_dtype(df[x_col]):
+                    st.error(f"Scatter plots require numeric x-axis. Column '{x_col}' is {df[x_col].dtype}")
+                    return
+                if not pd.api.types.is_numeric_dtype(df[y_col]):
+                    st.error(f"Scatter plots require numeric y-axis. Column '{y_col}' is {df[y_col].dtype}")
+                    return
+
+                clean_df = df[[x_col, y_col]].dropna()
+                fig = px.scatter(
+                    clean_df,
+                    x=x_col,
+                    y=y_col,
+                    title=title,
+                    trendline="ols"  # Add trendline
+                )
                 st.plotly_chart(fig, use_container_width=True)
+
+                # Show correlation
+                correlation = clean_df[x_col].corr(clean_df[y_col])
+                st.caption(f"📊 Correlation: {correlation:.3f} ({'strong' if abs(correlation) > 0.7 else 'moderate' if abs(correlation) > 0.4 else 'weak'})")
             else:
                 st.scatter_chart(df[[x_col, y_col]].dropna())
 
@@ -516,9 +858,6 @@ def show_visualization_page():
                 st.write(f".env exists: {env_path.exists()}")
                 st.write(f"Current working directory: {os.getcwd()}")
         else:
-            # Show that API key is configured (don't expose any part of it)
-            st.success("✅ OpenAI API Key configured successfully")
-
             # Add button to trigger AI analysis
             if st.button("🔍 Analyze Dataset with AI", type="primary", use_container_width=True):
                 with st.spinner("🤖 AI is analyzing your dataset... This may take 30-60 seconds"):
@@ -556,6 +895,10 @@ def show_visualization_page():
 
                     for i, viz in enumerate(analysis['visualizations'], 1):
                         with st.expander(f"📈 {i}. {viz.get('title', 'Visualization')}", expanded=i<=2):
+                            # Validate required fields
+                            chart_type = viz.get('chart_type')
+                            x_column = viz.get('x_column')
+
                             # Description
                             st.markdown(f"**Why this matters:** {viz.get('description', 'N/A')}")
 
@@ -563,13 +906,22 @@ def show_visualization_page():
                             if 'insight' in viz:
                                 st.info(f"💡 **Insight:** {viz['insight']}")
 
+                            # Check if visualization has required fields
+                            if not chart_type:
+                                st.error("⚠️ AI did not specify a chart type for this visualization. Skipping...")
+                                continue
+
+                            if not x_column:
+                                st.error(f"⚠️ AI did not specify required columns for this {chart_type} chart. Skipping...")
+                                continue
+
                             # Chart details
-                            columns_info = f"x: {viz.get('x_column', 'N/A')}"
+                            columns_info = f"x: {x_column}"
                             if viz.get('y_column'):
                                 columns_info += f", y: {viz.get('y_column')}"
                             if viz.get('value_column'):
                                 columns_info += f", value: {viz.get('value_column')}"
-                            st.caption(f"Chart type: {viz.get('chart_type', 'N/A')} | Columns: {columns_info}")
+                            st.caption(f"Chart type: {chart_type} | Columns: {columns_info}")
 
                             # Generate the chart
                             st.markdown("---")
@@ -581,6 +933,98 @@ def show_visualization_page():
                     st.warning("No visualizations recommended")
             else:
                 st.info("👆 Click the button above to get AI-powered insights and visualization recommendations")
+
+            st.divider()
+
+            # LIDA Section - Simplified direct chart generation
+            st.subheader("🚀 Quick Auto-Visualizations")
+            st.info("Let AI automatically create meaningful charts based on your data")
+
+            if st.button("🎨 Generate Auto Charts", type="secondary", use_container_width=True):
+                with st.spinner("🤖 Creating visualizations... This may take 30-60 seconds"):
+                    try:
+                        # Use OpenAI to generate simple chart instructions
+                        client = OpenAI(api_key=api_key)
+
+                        # Get column info
+                        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()[:10]
+                        categorical_cols = df.select_dtypes(include=['object', 'category']).columns.tolist()[:10]
+
+                        prompt = f"""Generate 5 specific Plotly Express chart code snippets for this dataset.
+
+Dataset: {st.session_state.viz_name}
+Numeric columns: {numeric_cols}
+Categorical columns: {categorical_cols}
+Rows: {len(df)}
+
+For each chart, provide ONLY the Python code using plotly express. Use variable 'data' for the dataframe.
+
+Requirements:
+- Use only plotly.express (as px)
+- Each code block must create a variable called 'fig'
+- Use actual column names from the lists above
+- No explanations, just code
+- Separate each code block with "---CHART---"
+
+Generate 5 different charts (bar, line, scatter, histogram, box) using appropriate columns."""
+
+                        response = client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[
+                                {"role": "system", "content": "You are a data visualization expert. Generate only valid Python code for Plotly Express charts."},
+                                {"role": "user", "content": prompt}
+                            ],
+                            temperature=0.3,
+                            max_tokens=2000
+                        )
+
+                        # Parse and execute charts
+                        code_blocks = response.choices[0].message.content.split("---CHART---")
+
+                        st.success(f"✅ Generated {len(code_blocks)} visualizations!")
+
+                        for i, code_block in enumerate(code_blocks, 1):
+                            code = code_block.strip()
+                            if not code or len(code) < 10:
+                                continue
+
+                            # Remove markdown code blocks if present
+                            if code.startswith("```"):
+                                code = "\n".join(code.split("\n")[1:-1])
+
+                            with st.expander(f"📊 Chart {i}", expanded=i<=3):
+                                try:
+                                    # Create namespace
+                                    namespace = {
+                                        'pd': pd,
+                                        'px': px,
+                                        'go': go,
+                                        'data': df,
+                                        'np': np
+                                    }
+
+                                    # Execute code
+                                    exec(code, namespace)
+
+                                    # Display chart
+                                    if 'fig' in namespace:
+                                        st.plotly_chart(namespace['fig'], use_container_width=True)
+                                    else:
+                                        st.warning("Chart code executed but no figure found")
+
+                                    # Show code
+                                    with st.expander("View code"):
+                                        st.code(code, language="python")
+
+                                except Exception as e:
+                                    st.error(f"Error: {str(e)}")
+                                    with st.expander("View code (has errors)"):
+                                        st.code(code, language="python")
+
+                    except Exception as e:
+                        st.error(f"Failed to generate visualizations: {str(e)}")
+            else:
+                st.info("👆 Click the button above to automatically generate visualizations")
 
     with tab2:
         if numeric_cols:
