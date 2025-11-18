@@ -636,7 +636,7 @@ def list_datasets(org: Optional[str] = None):
 async def quick_preview(
     org: str = Query(..., pattern="^(CDC|SAMHSA)$"),
     uid: str = Query(...),
-    rows: int = Query(200, ge=1, le=10000),
+    rows: int = Query(200, ge=1, le=1000000),
 ):
     """
     Live preview directly from Socrata without ingesting.
@@ -678,9 +678,16 @@ def preview_dataset(
     key = f"raw/{org}/{uid}.parquet"
     bucket = os.environ.get("S3_BUCKET", "mh-raw")
     
+    # Use AWS S3 if endpoint is not set or set to empty/"aws"/"none"
+    endpoint = os.environ.get("S3_ENDPOINT")
+    if endpoint and endpoint.lower() not in ["", "aws", "none"]:
+        endpoint_url = endpoint
+    else:
+        endpoint_url = None  # Use AWS S3
+
     s3 = boto3.client(
         "s3",
-        endpoint_url=os.environ.get("S3_ENDPOINT", "http://minio:9000"),
+        endpoint_url=endpoint_url,
         aws_access_key_id=(os.environ.get("S3_ACCESS_KEY") or os.environ.get("MINIO_ROOT_USER")),
         aws_secret_access_key=(os.environ.get("S3_SECRET_KEY") or os.environ.get("MINIO_ROOT_PASSWORD")),
         region_name=(os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("S3_REGION") or "us-east-1"),
@@ -837,10 +844,17 @@ async def download_dataset(org: str, uid: str):
     import os
 
     try:
+        # Use AWS S3 if endpoint is not set or set to empty/"aws"/"none"
+        endpoint = settings.S3_ENDPOINT
+        if endpoint and endpoint.lower() not in ["", "aws", "none"]:
+            endpoint_url = endpoint
+        else:
+            endpoint_url = None  # Use AWS S3
+
         # Get S3 client
         s3 = boto3.client(
             "s3",
-            endpoint_url=settings.S3_ENDPOINT,
+            endpoint_url=endpoint_url,
             aws_access_key_id=settings.S3_ACCESS_KEY or os.environ.get("MINIO_ROOT_USER"),
             aws_secret_access_key=settings.S3_SECRET_KEY or os.environ.get("MINIO_ROOT_PASSWORD"),
             region_name=settings.AWS_DEFAULT_REGION,

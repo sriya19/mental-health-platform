@@ -16,9 +16,16 @@ from .semantic import embed_text
 
 def _s3_client():
     """Get S3/MinIO client"""
+    # Use AWS S3 if endpoint is not set or set to empty/"aws"/"none"
+    endpoint = settings.S3_ENDPOINT
+    if endpoint and endpoint.lower() not in ["", "aws", "none"]:
+        endpoint_url = endpoint
+    else:
+        endpoint_url = None  # Use AWS S3
+
     return boto3.client(
         "s3",
-        endpoint_url=settings.S3_ENDPOINT,
+        endpoint_url=endpoint_url,
         aws_access_key_id=settings.S3_ACCESS_KEY or os.environ.get("MINIO_ROOT_USER"),
         aws_secret_access_key=settings.S3_SECRET_KEY or os.environ.get("MINIO_ROOT_PASSWORD"),
         region_name=settings.AWS_DEFAULT_REGION,

@@ -5,20 +5,26 @@ import boto3
 from botocore.exceptions import ClientError
 
 def _s3_client():
-    endpoint = os.environ.get("S3_ENDPOINT", "http://minio:9000")
+    endpoint = os.environ.get("S3_ENDPOINT")
+    # If endpoint is explicitly set to empty string or "aws", use AWS S3
+    if endpoint and endpoint.lower() not in ["", "aws", "none"]:
+        endpoint_url = endpoint
+    else:
+        endpoint_url = None  # Use AWS S3
+
     # Prefer S3_* keys; fall back to MinIO root creds if not present
     access_key = os.environ.get("S3_ACCESS_KEY") or os.environ.get("MINIO_ROOT_USER")
     secret_key = os.environ.get("S3_SECRET_KEY") or os.environ.get("MINIO_ROOT_PASSWORD")
     region = (os.environ.get("AWS_DEFAULT_REGION")
               or os.environ.get("S3_REGION")
               or "us-east-1")
-    
+
     if not access_key or not secret_key:
         raise RuntimeError("Missing S3 credentials: set S3_ACCESS_KEY/S3_SECRET_KEY or MINIO_ROOT_USER/MINIO_ROOT_PASSWORD")
 
     return boto3.client(
         "s3",
-        endpoint_url=endpoint,
+        endpoint_url=endpoint_url,
         aws_access_key_id=access_key,
         aws_secret_access_key=secret_key,
         region_name=region,

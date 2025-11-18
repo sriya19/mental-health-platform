@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     PG_DB: Optional[str] = None
 
     # S3 / MinIO
+    # Set S3_ENDPOINT to empty/"aws"/"none" to use AWS S3
+    # Set to "http://minio:9000" for local MinIO
     S3_ENDPOINT: str = "http://minio:9000"
     S3_BUCKET: str = "mh-raw"
     S3_ACCESS_KEY: str = "minioadmin"
