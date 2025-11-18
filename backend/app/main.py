@@ -707,13 +707,19 @@ def preview_dataset(
     if state and "state" in df.columns:
         df = df[df["state"] == state]
 
+    # Return the requested number of rows (or all if count is large enough)
+    # This ensures full dataset can be loaded for visualization
+    sample_df = df.head(count) if count < len(df) else df
+
     return {
         "org": org,
         "uid": uid,
         "s3_key": key,
         "rows": int(len(df)),
+        "total_rows": int(len(df)),
         "cols": list(df.columns),
-        "sample": df.head(count).to_dict(orient="records"),
+        "sample": sample_df.to_dict(orient="records"),
+        "returned_rows": int(len(sample_df))
     }
 
 
