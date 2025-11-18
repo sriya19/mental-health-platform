@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from typing import Optional
 import json
+import io
 import pandas as pd
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -19,6 +20,12 @@ try:
     from . import rag
 except ImportError:
     rag = None
+
+# Import Baltimore-specific indexer
+try:
+    from . import baltimore_indexer
+except ImportError:
+    baltimore_indexer = None
 
 # FastAPI app
 app = FastAPI(title="MH Backend", version="1.0.0")
@@ -40,22 +47,32 @@ def health():
 # -----------------------------
 @app.get("/catalog/search")
 async def catalog_search(
-    org: str = Query(..., pattern="^(CDC|SAMHSA)$"),
+    org: str = Query(..., pattern="^(All|CDC|SAMHSA)$"),
     q: str = Query(..., description="Catalog search query"),
 ):
-    hits = await socrata.search_catalog(org, q, limit=10)
-    return {
-        "results": [
-            {
-                "name": h.get("name"),
-                "description": h.get("description"),
-                "uid": h.get("uid"),
-                "link": h.get("link"),
-                "org": org,
-            }
-            for h in hits
-        ]
-    }
+    # Determine which organizations to search
+    if org == "All":
+        orgs_to_search = ["CDC", "SAMHSA"]
+    else:
+        orgs_to_search = [org]
+
+    # Search each organization and merge results
+    all_results = []
+    for search_org in orgs_to_search:
+        try:
+            hits = await socrata.search_catalog(search_org, q, limit=10)
+            for h in hits:
+                all_results.append({
+                    "name": h.get("name"),
+                    "description": h.get("description"),
+                    "uid": h.get("uid"),
+                    "link": h.get("link"),
+                    "org": search_org,  # Use the actual org, not "All"
+                })
+        except Exception as e:
+            print(f"[Catalog Search] Failed to search {search_org}: {e}")
+
+    return {"results": all_results}
 
 
 # -----------------------------
@@ -78,7 +95,7 @@ class IngestRequest(BaseModel):
 class IndexRequest(BaseModel):
     org: str
     uid: str
-    limit_rows: int = 5000
+    limit_rows: int = 20000
 
 
 # -----------------------------
@@ -149,9 +166,9 @@ async def do_ingest(req: IngestRequest):
             print(f"[Ingest] Auto-indexing dataset {uid}")
             try:
                 index_result = await rag.index_dataset_content(
-                    org=org, 
+                    org=org,
                     uid=uid,
-                    limit_rows=min(5000, len(df))
+                    limit_rows=min(20000, len(df))
                 )
                 result["indexed"] = index_result.get("success", False)
                 result["chunks_created"] = index_result.get("chunks_created", 0)
@@ -165,6 +182,92 @@ async def do_ingest(req: IngestRequest):
         
     except Exception as e:
         return {"ingested": False, "error": str(e)}
+
+
+# -----------------------------
+# Upload Local CSV File
+# -----------------------------
+@app.post("/upload_csv")
+async def upload_csv(
+    file: UploadFile = File(...),
+    dataset_name: str = Form(...),
+    description: str = Form(""),
+    org: str = Form("LOCAL"),
+    auto_index: bool = Form(False)
+):
+    """
+    Upload a local CSV file and ingest it into the platform.
+    Optionally index it for RAG queries.
+    """
+    try:
+        # Validate file type
+        if not file.filename.endswith('.csv'):
+            raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+        # Read CSV file
+        contents = await file.read()
+        df = pd.read_csv(io.BytesIO(contents))
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="CSV file is empty")
+
+        # Generate a unique ID for this dataset
+        import hashlib
+        import datetime
+        uid = hashlib.md5(f"{dataset_name}_{datetime.datetime.now()}".encode()).hexdigest()[:8]
+
+        # Register in database
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO datasets (name, source_org, source_url, description)
+                VALUES (:n, :o, :u, :d)
+                ON CONFLICT (source_org, source_url) DO UPDATE
+                SET name = EXCLUDED.name, description = EXCLUDED.description;
+            """), {
+                "n": dataset_name,
+                "o": org,
+                "u": f"local/{uid}",
+                "d": description or f"Uploaded CSV: {file.filename}"
+            })
+
+        # Write to S3/MinIO
+        from . import ingest as ingest_mod
+        s3_key = f"raw/{org}/{uid}.parquet"
+        ingest_mod.write_parquet_to_minio(df, s3_key)
+
+        result = {
+            "ingested": True,
+            "rows": int(len(df)),
+            "columns": list(df.columns),
+            "dataset_uid": uid,
+            "s3_key": s3_key,
+            "name": dataset_name,
+            "org": org
+        }
+
+        # Auto-index if requested
+        if auto_index and rag:
+            print(f"[Upload CSV] Auto-indexing dataset {uid}")
+            try:
+                index_result = await rag.index_dataset_content(
+                    org=org,
+                    uid=uid,
+                    limit_rows=min(20000, len(df))
+                )
+                result["indexed"] = index_result.get("success", False)
+                result["chunks_created"] = index_result.get("chunks_created", 0)
+                print(f"[Upload CSV] Indexed {result['chunks_created']} chunks")
+            except Exception as e:
+                result["indexed"] = False
+                result["index_error"] = str(e)
+                print(f"[Upload CSV] Index failed: {e}")
+
+        return result
+
+    except pd.errors.EmptyDataError:
+        raise HTTPException(status_code=400, detail="CSV file is empty or invalid")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
 
 # -----------------------------
@@ -191,6 +294,97 @@ async def index_dataset_for_rag(req: IndexRequest):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# -----------------------------
+# Index Baltimore-specific data only
+# -----------------------------
+@app.post("/index_baltimore")
+async def index_baltimore_dataset(req: IndexRequest):
+    """
+    Index ONLY Baltimore/Maryland data from a dataset.
+    Filters out all non-Baltimore data before creating chunks.
+    """
+    if not baltimore_indexer:
+        raise HTTPException(
+            status_code=500,
+            detail="Baltimore indexer module not available."
+        )
+
+    try:
+        result = await baltimore_indexer.index_baltimore_data(
+            org=req.org,
+            uid=req.uid
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# -----------------------------
+# Batch index all datasets for Baltimore data
+# -----------------------------
+@app.post("/batch_index_baltimore")
+async def batch_index_baltimore(org: str = Query(..., pattern="^(CDC|SAMHSA)$")):
+    """
+    Re-index all datasets to include ONLY Baltimore/Maryland data.
+    This replaces existing chunks with Baltimore-filtered chunks.
+    """
+    if not baltimore_indexer:
+        raise HTTPException(
+            status_code=500,
+            detail="Baltimore indexer module not available."
+        )
+
+    # Get all ingested datasets
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT source_url
+                FROM datasets
+                WHERE source_org = :o
+            """),
+            {"o": org}
+        ).fetchall()
+
+    results = []
+    for row in rows:
+        source_url = row[0]
+        if "/d/" in source_url:
+            try:
+                uid = source_url.split("/d/")[1].split("?")[0].split("/")[0]
+                print(f"[Batch Baltimore Index] Processing {uid}")
+                result = await baltimore_indexer.index_baltimore_data(
+                    org=org,
+                    uid=uid
+                )
+                results.append({
+                    "uid": uid,
+                    "success": result.get("success", False),
+                    "baltimore_rows": result.get("baltimore_rows", 0),
+                    "chunks": result.get("chunks_created", 0),
+                    "reason": result.get("reason", "")
+                })
+            except Exception as e:
+                results.append({
+                    "uid": uid,
+                    "success": False,
+                    "error": str(e)
+                })
+
+    successful = sum(1 for r in results if r.get("success"))
+    total_baltimore_rows = sum(r.get("baltimore_rows", 0) for r in results)
+    total_chunks = sum(r.get("chunks", 0) for r in results)
+
+    return {
+        "org": org,
+        "total_datasets": len(results),
+        "successful": successful,
+        "failed": len(results) - successful,
+        "total_baltimore_rows": total_baltimore_rows,
+        "total_chunks_created": total_chunks,
+        "details": results
+    }
 
 
 # -----------------------------
@@ -228,7 +422,7 @@ async def batch_index(org: str = Query(..., pattern="^(CDC|SAMHSA)$")):
                 result = await rag.index_dataset_content(
                     org=org,
                     uid=uid,
-                    limit_rows=5000
+                    limit_rows=20000
                 )
                 results.append({
                     "uid": uid,
@@ -256,7 +450,7 @@ async def batch_index(org: str = Query(..., pattern="^(CDC|SAMHSA)$")):
 # Check indexing status
 # -----------------------------
 @app.get("/rag_status")
-async def rag_status(org: str = Query("CDC", pattern="^(CDC|SAMHSA)$")):
+async def rag_status(org: str = Query("All")):
     """
     Check the status of data indexing for RAG.
     """
@@ -265,12 +459,12 @@ async def rag_status(org: str = Query("CDC", pattern="^(CDC|SAMHSA)$")):
         table_check = conn.execute(
             text("""
                 SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
+                    SELECT FROM information_schema.tables
                     WHERE table_name = 'data_chunks'
                 )
             """)
         ).scalar()
-        
+
         if not table_check:
             return {
                 "org": org,
@@ -279,36 +473,63 @@ async def rag_status(org: str = Query("CDC", pattern="^(CDC|SAMHSA)$")):
                 "total_chunks": 0,
                 "message": "Data indexing not yet initialized. Ingest and index some datasets first."
             }
-        
-        # Get statistics
-        stats = conn.execute(
-            text("""
-                SELECT 
-                    COUNT(DISTINCT dataset_uid) as indexed_datasets,
-                    COUNT(*) as total_chunks
-                FROM data_chunks
-                WHERE org = :o
-            """),
-            {"o": org}
-        ).fetchone()
-        
-        # Get list of indexed datasets with names
-        datasets = conn.execute(
-            text("""
-                SELECT 
-                    dc.dataset_uid,
-                    COUNT(*) as chunk_count,
-                    MAX(dc.created_at) as last_indexed,
-                    d.name as dataset_name
-                FROM data_chunks dc
-                LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
-                WHERE dc.org = :o
-                GROUP BY dc.dataset_uid, d.name
-                ORDER BY last_indexed DESC
-                LIMIT 10
-            """),
-            {"o": org}
-        ).mappings().all()
+
+        # Get statistics - handle "All" organization
+        if org == "All":
+            stats = conn.execute(
+                text("""
+                    SELECT
+                        COUNT(DISTINCT dataset_uid) as indexed_datasets,
+                        COUNT(*) as total_chunks
+                    FROM data_chunks
+                """)
+            ).fetchone()
+
+            # Get list of indexed datasets with names
+            datasets = conn.execute(
+                text("""
+                    SELECT
+                        dc.dataset_uid,
+                        dc.org,
+                        COUNT(*) as chunk_count,
+                        MAX(dc.created_at) as last_indexed,
+                        d.name as dataset_name
+                    FROM data_chunks dc
+                    LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                    GROUP BY dc.dataset_uid, dc.org, d.name
+                    ORDER BY last_indexed DESC
+                    LIMIT 10
+                """)
+            ).mappings().all()
+        else:
+            stats = conn.execute(
+                text("""
+                    SELECT
+                        COUNT(DISTINCT dataset_uid) as indexed_datasets,
+                        COUNT(*) as total_chunks
+                    FROM data_chunks
+                    WHERE org = :o
+                """),
+                {"o": org}
+            ).fetchone()
+
+            # Get list of indexed datasets with names
+            datasets = conn.execute(
+                text("""
+                    SELECT
+                        dc.dataset_uid,
+                        COUNT(*) as chunk_count,
+                        MAX(dc.created_at) as last_indexed,
+                        d.name as dataset_name
+                    FROM data_chunks dc
+                    LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                    WHERE dc.org = :o
+                    GROUP BY dc.dataset_uid, d.name
+                    ORDER BY last_indexed DESC
+                    LIMIT 10
+                """),
+                {"o": org}
+            ).mappings().all()
         
         return {
             "org": org,
@@ -340,13 +561,13 @@ def list_datasets(org: Optional[str] = None):
             """)
         ).scalar()
         
-        if org:
+        if org and org != "All":
             r = conn.execute(
                 text("""
-                    SELECT id, name, source_org, source_url, description, created_at
+                    SELECT dataset_id, name, source_org, source_url, description, first_ingested_at
                     FROM datasets
                     WHERE source_org = :o
-                    ORDER BY created_at DESC
+                    ORDER BY first_ingested_at DESC
                     LIMIT 200
                 """),
                 {"o": org},
@@ -354,9 +575,9 @@ def list_datasets(org: Optional[str] = None):
         else:
             r = conn.execute(
                 text("""
-                    SELECT id, name, source_org, source_url, description, created_at
+                    SELECT dataset_id, name, source_org, source_url, description, first_ingested_at
                     FROM datasets
-                    ORDER BY created_at DESC
+                    ORDER BY first_ingested_at DESC
                     LIMIT 200
                 """)
             )
@@ -364,8 +585,15 @@ def list_datasets(org: Optional[str] = None):
         for (id_, name, source_org, source_url, desc, created_at) in r:
             uid = None
             if "/d/" in (source_url or ""):
+                # Online dataset (CDC/SAMHSA)
                 try:
                     uid = source_url.split("/d/")[1].split("?")[0].split("/")[0]
+                except Exception:
+                    uid = None
+            elif "local/" in (source_url or ""):
+                # Local uploaded dataset
+                try:
+                    uid = source_url.split("local/")[1]
                 except Exception:
                     uid = None
             
@@ -594,3 +822,46 @@ async def get_system_stats():
                 "has_data_chunks": has_chunks
             }
         }
+
+
+# -----------------------------
+# Download dataset as JSON
+# -----------------------------
+@app.get("/download/{org}/{uid}")
+async def download_dataset(org: str, uid: str):
+    """
+    Download a dataset as JSON
+    Returns the raw data from the Parquet file
+    """
+    import boto3
+    import os
+
+    try:
+        # Get S3 client
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=settings.S3_ENDPOINT,
+            aws_access_key_id=settings.S3_ACCESS_KEY or os.environ.get("MINIO_ROOT_USER"),
+            aws_secret_access_key=settings.S3_SECRET_KEY or os.environ.get("MINIO_ROOT_PASSWORD"),
+            region_name=settings.AWS_DEFAULT_REGION,
+        )
+
+        # Download from S3
+        s3_key = f"raw/{org}/{uid}.parquet"
+        obj = s3.get_object(Bucket=settings.S3_BUCKET, Key=s3_key)
+        buf = io.BytesIO(obj["Body"].read())
+
+        # Read parquet
+        df = pd.read_parquet(buf)
+
+        # Convert to JSON
+        return {
+            "uid": uid,
+            "org": org,
+            "rows": len(df),
+            "columns": len(df.columns),
+            "data": json.loads(df.to_json(orient="records", date_format="iso"))
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to download dataset: {str(e)}")

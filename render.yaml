@@ -1,0 +1,63 @@
+services:
+  # PostgreSQL Database
+  - type: pserv
+    name: mental-health-db
+    env: docker
+    plan: free
+    dockerfilePath: ./infra/Dockerfile.postgres
+    envVars:
+      - key: POSTGRES_DB
+        value: mh_catalog
+      - key: POSTGRES_USER
+        value: app_user
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+
+  # Backend API
+  - type: web
+    name: mental-health-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    plan: free
+    envVars:
+      - key: POSTGRES_HOST
+        fromService:
+          type: pserv
+          name: mental-health-db
+          property: host
+      - key: POSTGRES_PORT
+        value: 5432
+      - key: POSTGRES_DB
+        value: mh_catalog
+      - key: POSTGRES_USER
+        value: app_user
+      - key: POSTGRES_PASSWORD
+        fromService:
+          type: pserv
+          name: mental-health-db
+          envVarKey: POSTGRES_PASSWORD
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: MINIO_ENDPOINT
+        value: localhost:9000
+      - key: MINIO_ACCESS_KEY
+        value: minioadmin
+      - key: MINIO_SECRET_KEY
+        generateValue: true
+    healthCheckPath: /health
+
+  # Streamlit Frontend
+  - type: web
+    name: mental-health-frontend
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run ui_app/streamlit_app.py
+    envVars:
+      - key: BACKEND_URL
+        fromService:
+          type: web
+          name: mental-health-backend
+          property: url
+      - key: OPENAI_API_KEY
+        sync: false

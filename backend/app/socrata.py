@@ -9,9 +9,15 @@ from .config import settings
 CATALOG_V1 = "https://api.us.socrata.com/api/catalog/v1"
 
 # Domains we support
+# Note: BRFSS, NHIS, YRBSS, NSSP are CDC surveys/programs, not separate domains
+# They are all hosted on data.cdc.gov
 DOMAINS = {
     "CDC": "data.cdc.gov",
     "SAMHSA": "data.samhsa.gov",
+    "BRFSS": "data.cdc.gov",  # Behavioral Risk Factor Surveillance System (CDC survey)
+    "NHIS": "data.cdc.gov",   # National Health Interview Survey (CDC/NCHS survey)
+    "YRBSS": "data.cdc.gov",  # Youth Risk Behavior Surveillance System (CDC survey)
+    "NSSP": "data.cdc.gov",   # National Syndromic Surveillance Program (CDC program)
 }
 
 # Regex to extract UID from permalinks like /d/xkb8-kh2a or /dataset/xkb8-kh2a

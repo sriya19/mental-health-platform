@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS datasets (
   source_org TEXT,
   source_url TEXT,
   description TEXT,
-  first_ingested_at TIMESTAMP DEFAULT NOW()
+  first_ingested_at TIMESTAMP DEFAULT NOW(),
+  UNIQUE (source_org, source_url)
 );
 
 CREATE TABLE IF NOT EXISTS meta_docs (

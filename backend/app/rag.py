@@ -24,7 +24,7 @@ def _vec_literal(vec: list[float]) -> str:
     """Convert Python list -> SQL vector literal for pgvector."""
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
 
-async def index_dataset_content(org: str, uid: str, limit_rows: int = 5000) -> Dict[str, Any]:
+async def index_dataset_content(org: str, uid: str, limit_rows: int = 20000) -> Dict[str, Any]:
     """
     Load a dataset from MinIO and create searchable chunks from actual data.
     This processes the real data rows, not just metadata.
@@ -281,43 +281,137 @@ async def search_dataset_chunks(question: str, org: str = "CDC", k: int = 10) ->
     """
     Search through actual dataset chunks stored in the database.
     Returns chunks of actual data that are most relevant to the question.
+    Prioritizes Baltimore/Maryland data when location keywords are detected.
     """
     # Embed the question
     emb = await embed_text(question)
     vec = _vec_literal(emb)
-    
+
+    # Detect location-specific queries
+    question_lower = question.lower()
+    baltimore_keywords = ['baltimore', 'maryland', 'md']
+    is_baltimore_query = any(keyword in question_lower for keyword in baltimore_keywords)
+
     with engine.begin() as conn:
         # First, check if we have any data chunks
-        result = conn.execute(
-            text("SELECT COUNT(*) as cnt FROM data_chunks WHERE org = :o"),
-            {"o": org}
-        ).fetchone()
-        
+        if org == "All":
+            result = conn.execute(
+                text("SELECT COUNT(*) as cnt FROM data_chunks")
+            ).fetchone()
+        else:
+            result = conn.execute(
+                text("SELECT COUNT(*) as cnt FROM data_chunks WHERE org = :o"),
+                {"o": org}
+            ).fetchone()
+
         if result[0] == 0:
             print(f"[RAG] No data chunks found for {org}")
             return []
-        
+
         print(f"[RAG] Searching {result[0]} data chunks for: {question[:50]}...")
-        
-        # Search for relevant chunks
-        rows = conn.execute(
-            text("""
-                SELECT 
-                    dc.chunk_id,
-                    dc.dataset_uid,
-                    dc.content,
-                    dc.summary,
-                    dc.metadata,
-                    d.name as dataset_name,
-                    d.description as dataset_description
-                FROM data_chunks dc
-                LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
-                WHERE dc.org = :o
-                ORDER BY dc.embedding <-> CAST(:v AS vector)
-                LIMIT :k
-            """),
-            {"o": org, "v": vec, "k": k}
-        ).mappings().all()
-        
+        if is_baltimore_query:
+            print(f"[RAG] Baltimore-specific query detected - filtering for Maryland/Baltimore data")
+
+        # If Baltimore query, first try to get Baltimore-specific chunks
+        if is_baltimore_query:
+            if org == "All":
+                baltimore_rows = conn.execute(
+                    text("""
+                        SELECT
+                            dc.chunk_id,
+                            dc.dataset_uid,
+                            dc.org,
+                            dc.content,
+                            dc.summary,
+                            dc.metadata,
+                            d.name as dataset_name,
+                            d.description as dataset_description
+                        FROM data_chunks dc
+                        LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                        WHERE (
+                              dc.content ILIKE '%baltimore%'
+                              OR dc.content ILIKE '%maryland%'
+                              OR dc.content ILIKE '% MD %'
+                              OR dc.content ILIKE '%countyfips: 24005%'
+                              OR dc.content ILIKE '%stateabbr: MD%'
+                          )
+                        ORDER BY dc.embedding <-> CAST(:v AS vector)
+                        LIMIT :k
+                    """),
+                    {"v": vec, "k": k}
+                ).mappings().all()
+            else:
+                baltimore_rows = conn.execute(
+                    text("""
+                        SELECT
+                            dc.chunk_id,
+                            dc.dataset_uid,
+                            dc.content,
+                            dc.summary,
+                            dc.metadata,
+                            d.name as dataset_name,
+                            d.description as dataset_description
+                        FROM data_chunks dc
+                        LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                        WHERE dc.org = :o
+                          AND (
+                              dc.content ILIKE '%baltimore%'
+                              OR dc.content ILIKE '%maryland%'
+                              OR dc.content ILIKE '% MD %'
+                              OR dc.content ILIKE '%countyfips: 24005%'
+                              OR dc.content ILIKE '%stateabbr: MD%'
+                          )
+                        ORDER BY dc.embedding <-> CAST(:v AS vector)
+                        LIMIT :k
+                    """),
+                    {"o": org, "v": vec, "k": k}
+                ).mappings().all()
+
+            if baltimore_rows:
+                print(f"[RAG] Found {len(baltimore_rows)} Baltimore-specific data chunks")
+                return [dict(r) for r in baltimore_rows]
+            else:
+                print(f"[RAG] No Baltimore-specific chunks found, falling back to general search")
+
+        # General search (or fallback if no Baltimore data)
+        if org == "All":
+            rows = conn.execute(
+                text("""
+                    SELECT
+                        dc.chunk_id,
+                        dc.dataset_uid,
+                        dc.org,
+                        dc.content,
+                        dc.summary,
+                        dc.metadata,
+                        d.name as dataset_name,
+                        d.description as dataset_description
+                    FROM data_chunks dc
+                    LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                    ORDER BY dc.embedding <-> CAST(:v AS vector)
+                    LIMIT :k
+                """),
+                {"v": vec, "k": k}
+            ).mappings().all()
+        else:
+            rows = conn.execute(
+                text("""
+                    SELECT
+                        dc.chunk_id,
+                        dc.dataset_uid,
+                        dc.content,
+                        dc.summary,
+                        dc.metadata,
+                        d.name as dataset_name,
+                        d.description as dataset_description
+                    FROM data_chunks dc
+                    LEFT JOIN datasets d ON d.source_url LIKE '%' || dc.dataset_uid || '%'
+                    WHERE dc.org = :o
+                    ORDER BY dc.embedding <-> CAST(:v AS vector)
+                    LIMIT :k
+                """),
+                {"o": org, "v": vec, "k": k}
+            ).mappings().all()
+
         print(f"[RAG] Found {len(rows)} relevant data chunks")
         return [dict(r) for r in rows]
