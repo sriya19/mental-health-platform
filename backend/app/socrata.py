@@ -135,25 +135,40 @@ Respond with ONLY the extracted keywords (no explanation, no preamble, no extra 
 
 async def search_catalog(org: str, q: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
-    Search Socrata catalog with LLM-powered query preprocessing.
-    
+    Search Socrata catalog with LLM-powered query preprocessing and program-level filtering.
+
     Strategy:
     1) Use LLM to extract search terms from verbose queries
-    2) Try global catalog v1 (api.us.socrata.com)
-    3) If it 404s or errors, fall back to site-local search API
-    4) Normalize results to: name, description, uid, link, org
-    
+    2) Add program-specific keywords for CDC survey programs (BRFSS, NHIS, YRBSS, NSSP)
+    3) Try global catalog v1 (api.us.socrata.com)
+    4) If it 404s or errors, fall back to site-local search API
+    5) Normalize results to: name, description, uid, link, org
+
     Args:
-        org: Organization ("CDC" or "SAMHSA")
+        org: Organization ("CDC", "SAMHSA", "BRFSS", "NHIS", "YRBSS", "NSSP")
         q: User's search query (can be verbose)
         limit: Maximum number of results to return
-        
+
     Returns:
         List of dataset dictionaries with name, description, uid, link, org
     """
     # Use LLM to extract meaningful search terms from verbose queries
     search_terms = await _llm_extract_search_terms(q)
-    
+
+    # Add program-specific keywords for CDC survey programs
+    # This filters results to specific programs when selected
+    program_keywords = {
+        "BRFSS": "BRFSS Behavioral Risk Factor Surveillance System",
+        "NHIS": "NHIS National Health Interview Survey",
+        "YRBSS": "YRBSS Youth Risk Behavior Surveillance System",
+        "NSSP": "NSSP National Syndromic Surveillance Program"
+    }
+
+    if org in program_keywords:
+        # Append program name to filter results
+        search_terms = f"{search_terms} {program_keywords[org]}"
+        print(f"[Program Filter] Applied {org} filter to search: '{search_terms}'")
+
     domain = DOMAINS[org]
 
     async with httpx.AsyncClient(timeout=30) as client:
