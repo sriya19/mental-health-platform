@@ -139,8 +139,8 @@ def preview_dataset(org: str, uid: str, rows: int = 200) -> Optional[pd.DataFram
 
 def load_existing_datasets():
     """
-    Load ingested datasets from backend database.
-    Note: We don't load indexed status - that's tracked only within the current session.
+    Load ingested and indexed datasets from backend database.
+    Populates session state so UI shows correct status for already-ingested datasets.
     """
     try:
         # Fetch all datasets from backend
@@ -152,8 +152,9 @@ def load_existing_datasets():
 
         datasets = data.get("items", [])
 
-        # Extract UIDs of ingested datasets only
+        # Extract UIDs of ingested and indexed datasets
         ingested_uids = set()
+        indexed_uids = set()
 
         for dataset in datasets:
             uid = dataset.get("uid")
@@ -161,12 +162,16 @@ def load_existing_datasets():
                 # All datasets in the database are considered ingested
                 ingested_uids.add(uid)
 
-        # Update session state - only ingested, not indexed
+                # Check if dataset is indexed for RAG
+                if dataset.get("indexed_for_rag", False):
+                    indexed_uids.add(uid)
+
+        # Update session state
         st.session_state.ingested_datasets = ingested_uids
-        # Keep indexed_datasets as empty set (tracked only in current session)
+        st.session_state.indexed_datasets = indexed_uids
         st.session_state.datasets_loaded = True
 
-        print(f"[UI] Loaded {len(ingested_uids)} ingested datasets")
+        print(f"[UI] Loaded {len(ingested_uids)} ingested datasets, {len(indexed_uids)} indexed")
 
     except Exception as e:
         print(f"[UI] Error loading datasets: {e}")
@@ -946,6 +951,8 @@ def main():
 
                         if is_local:
                             st.success("💾 Local")
+                        elif is_ingested:
+                            st.info("✅ Ingested")
                         else:
                             # Auto-index checkbox
                             auto_index = st.checkbox(
@@ -981,10 +988,8 @@ def main():
                         # Index for RAG button
                         is_indexed = uid in st.session_state.indexed_datasets
                         if is_indexed:
-                            # Already indexed - show status only
-                            st.success("✅ Indexed")
+                            st.info("📚 Indexed")
                         elif is_ingested or is_local:
-                            # Not indexed yet - show Index button
                             if st.button(f"📚 Index", key=f"index_{i}_{uid}"):
                                 with st.spinner(f"Indexing {result['name'][:30]}... (1-2 min)"):
                                     index_data, error = call_backend(
@@ -1003,8 +1008,6 @@ def main():
                                         st.session_state.indexed_datasets.add(uid)
                                     else:
                                         st.error(f"Failed: {index_data.get('error', 'Unknown')}")
-                        else:
-                            st.info("💾 Ingest first")
                     
                     with col3:
                         if st.button(f"👁️ Preview", key=f"preview_{i}_{uid}"):

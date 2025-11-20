@@ -1,523 +1,609 @@
-# Mental Health Data Platform
+# Mental Health Platform
 
-An AI-powered data discovery and analysis platform for mental health datasets from government sources (CDC, SAMHSA, Baltimore Open Data).
-
-![Platform Version](https://img.shields.io/badge/version-1.0.0-blue)
-![Python](https://img.shields.io/badge/python-3.10+-green)
-![Docker](https://img.shields.io/badge/docker-required-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
+A comprehensive mental health data platform that enables discovery, ingestion, and intelligent querying of mental health datasets from CDC and SAMHSA through a RAG (Retrieval-Augmented Generation) powered interface.
 
 ## Overview
 
-This platform enables data scientists, researchers, and public health professionals to discover, analyze, and visualize mental health datasets using AI-powered tools. It combines real-time government data API integration with intelligent semantic search and question-answering capabilities.
-
-### Key Features
-
-- **AI-Powered Dataset Discovery** - Natural language search across CDC, SAMHSA, and Baltimore Open Data
-- **Semantic Search** - OpenAI embeddings for intelligent dataset matching across 66+ pre-ingested datasets
-- **RAG-Based Q&A** - Ask questions about actual data with context-aware answers
-- **Auto-Generated Visualizations** - AI analyzes data structure and creates appropriate charts automatically
-- **Full Data Pipeline** - Ingest, store, index, and query datasets through a unified interface
-- **Real-Time Search** - Live API calls to government data portals (no scraping, no caching)
+This platform provides a unified interface for working with mental health data from government sources. It combines:
+- **Data Discovery & Ingestion**: Search and ingest datasets from CDC and SAMHSA Socrata catalogs
+- **Vector-Based RAG**: Semantic search over dataset metadata and content using OpenAI embeddings
+- **AI-Powered Insights**: Query datasets using natural language with LLM-powered interpretation
+- **Interactive UI**: Streamlit-based web interface for exploration and visualization
+- **Scalable Storage**: MinIO (S3-compatible) for Parquet data storage, PostgreSQL with pgvector for metadata
 
 ## Architecture
 
-```
-┌─────────────────┐
-│  Streamlit UI   │  (Port 8501)
-└────────┬────────┘
-         │
-┌────────▼────────┐
-│  FastAPI Backend│  (Port 8000)
-└────────┬────────┘
-         │
-    ┌────┴────┬──────────┬──────────┐
-    │         │          │          │
-┌───▼───┐ ┌──▼──┐  ┌───▼────┐ ┌───▼────┐
-│ PG DB │ │MinIO│  │ OpenAI │ │Socrata │
-│+vector│ │ S3  │  │  API   │ │  API   │
-└───────┘ └─────┘  └────────┘ └────────┘
-```
+### Components
 
-### Tech Stack
+1. **Backend API (FastAPI)**
+   - RESTful API for data operations
+   - Located in: `backend/app/`
+   - Endpoints for catalog search, dataset ingestion, RAG queries, and data preview
+   - Modules:
+     - `main.py`: Core API endpoints and request handlers
+     - `socrata.py`: Socrata API integration for CDC/SAMHSA data
+     - `rag.py`: RAG implementation with vector similarity search
+     - `semantic.py`: Semantic search over dataset metadata
+     - `answer.py`: LLM-powered question answering
+     - `interpret.py`: Natural language query interpretation
+     - `ingest.py`: Data ingestion and S3 storage
+     - `db.py`: Database connection and ORM setup
+     - `llm.py`: OpenAI API integration
+     - `config.py`: Configuration management
 
-- **Backend**: FastAPI, Python 3.10+, SQLAlchemy
-- **Database**: PostgreSQL 16 with pgvector extension
-- **Storage**: MinIO (S3-compatible object storage)
-- **Frontend**: Streamlit
-- **AI/ML**: OpenAI GPT-4o-mini, OpenAI Embeddings
-- **Data APIs**: Socrata (CDC, SAMHSA), Baltimore Open Data
-- **Containers**: Docker & Docker Compose
-- **Data Format**: Apache Parquet
+2. **Database (PostgreSQL + pgvector)**
+   - Stores dataset metadata and vector embeddings
+   - Tables:
+     - `datasets`: Dataset registry with source information
+     - `chunks`: Vector-indexed content chunks for RAG (1536-dim embeddings)
+     - `meta_docs`: Document metadata with embeddings
+   - Uses pgvector extension for efficient similarity search
 
-## Quick Start
+3. **Object Storage (MinIO)**
+   - S3-compatible storage for Parquet files
+   - Stores ingested datasets in `raw/{org}/{uid}.parquet` format
+   - Web console available on port 9001
 
-### Prerequisites
+4. **UI Application (Streamlit)**
+   - Interactive web interface
+   - Located in: `ui_app/streamlit_app.py`
+   - Features:
+     - Dataset search and discovery
+     - Quick preview and visualization
+     - RAG-powered question answering
+     - Dataset management and indexing status
 
-- Docker Desktop (running)
-- Python 3.10+
-- Git
-- OpenAI API key ([Get one here](https://platform.openai.com/api-keys))
+5. **Indexing Script**
+   - `index_cdc_mental_health_intelligent.py`: Automated discovery and indexing of CDC mental health datasets
+   - Uses LLM to generate comprehensive search queries
+   - Targets 5000+ mental health-related datasets
 
-### 1. Clone Repository
+## Database Schema
 
-```bash
-git clone https://github.com/sriya19/mental-health-platform.git
-cd mental-health-platform
-git checkout sankarsh-updates
-```
+### PostgreSQL (Port 5432)
+- **Database**: `mh_catalog`
+- **Extensions**: pgvector
+- **Key Tables**:
+  - `datasets`: Source dataset metadata
+  - `chunks`: RAG vector embeddings (1536-dim OpenAI embeddings)
+  - `meta_docs`: Document metadata
+  - `semantic_index`: Semantic search index (created on first use)
+  - `data_chunks`: Indexed dataset content (created on first use)
 
-### 2. Set Up Environment
+### MinIO Object Storage (Ports 9000, 9001)
+- **Bucket**: `mh-raw`
+- **Format**: Apache Parquet
+- **Structure**: `raw/{org}/{dataset_uid}.parquet`
 
-```bash
-# Copy environment template
-cp .env.example .env
+## Prerequisites
 
-# Edit .env and add your OpenAI API key
-# OPENAI_API_KEY=sk-proj-your-key-here
-```
+- Docker Desktop (Windows/macOS) or Docker Engine + Docker Compose (Ubuntu)
+- 4GB+ RAM recommended
+- 10GB+ disk space for data storage
+- OpenAI API key (for RAG and LLM features)
 
-### 3. Start Docker Containers
+## Installation
 
-```bash
-docker-compose up -d
-```
+### Windows
 
-Wait ~30 seconds for all services to initialize.
+1. **Install Docker Desktop**
+   - Download from: https://www.docker.com/products/docker-desktop
+   - Run the installer and follow the setup wizard
+   - Ensure WSL 2 is enabled (Docker Desktop will prompt if needed)
+   - Start Docker Desktop and wait for it to fully initialize
 
-### 4. Restore Data (Recommended)
+2. **Clone or Extract the Repository**
+   ```powershell
+   cd C:\Users\YourName\Projects
+   # If you have the folder, navigate to it
+   cd mental-health-platform-master
+   ```
 
-```bash
-# Restore 66 datasets + 1,077 indexed chunks
-python scripts/utils/restore_data.py
-```
+3. **Create Environment File**
+   ```powershell
+   copy .env.example .env
+   notepad .env
+   ```
 
-This gives you a fully populated system with all datasets and indexed data ready to use.
+   Update the following required settings:
+   ```env
+   # PostgreSQL Configuration
+   POSTGRES_HOST=postgres
+   POSTGRES_PORT=5432
+   POSTGRES_DB=mh_catalog
+   POSTGRES_USER=app_user
+   POSTGRES_PASSWORD=YourSecurePassword123
 
-### 5. Start UI
+   # MinIO Configuration
+   MINIO_ROOT_USER=minioadmin
+   MINIO_ROOT_PASSWORD=YourSecurePassword456
+   S3_BUCKET=mh-raw
+   S3_ENDPOINT=http://minio:9000
+   S3_ACCESS_KEY=minioadmin
+   S3_SECRET_KEY=YourSecurePassword456
 
-```bash
-streamlit run ui_app/streamlit_app.py
-```
+   # OpenAI Configuration (Required for RAG features)
+   OPENAI_API_KEY=sk-your-key-here
+   OPENAI_MODEL=gpt-4o-mini
+   OPENAI_BASE_URL=https://api.openai.com/v1
 
-Open browser: **http://localhost:8501**
+   # Optional: Socrata API token for higher rate limits
+   SOCRATA_APP_TOKEN=your-token-here
+   ```
 
-## Features in Detail
+4. **Start the Platform**
+   ```powershell
+   docker-compose up -d
+   ```
 
-### 1. Dataset Discovery
+5. **Verify Installation**
+   ```powershell
+   docker-compose ps
+   ```
 
-**How it works:**
-- Enter a user story: "I want to analyze suicide rates across demographics"
-- System makes real-time API calls to CDC, SAMHSA, and Baltimore Open Data portals
-- Returns ranked, relevant datasets with metadata
+   All services should show "Up" status:
+   - `postgres`: Database
+   - `minio`: Object storage
+   - `backend`: API server
+   - `create-bucket`: Bucket initialization (will show "Up" or "Completed")
 
-**No web scraping, no caching** - all data comes directly from government APIs.
+6. **Access the Applications**
+   - Backend API: http://localhost:8000/docs
+   - MinIO Console: http://localhost:9001 (login with MINIO_ROOT_USER/PASSWORD)
+   - Health Check: http://localhost:8000/health
 
-### 2. Semantic Search
+### macOS
 
-- Uses OpenAI embeddings (1536 dimensions) for intelligent matching
-- Searches across 66+ pre-ingested datasets
-- Filters by organization, category, and relevance score
+1. **Install Docker Desktop**
+   ```bash
+   # Download from https://www.docker.com/products/docker-desktop
+   # Or install via Homebrew:
+   brew install --cask docker
+   ```
 
-### 3. RAG-Based Question Answering
+   - Open Docker Desktop from Applications
+   - Wait for Docker to start (whale icon in menu bar)
 
-- Ask natural language questions: "What is the suicide rate in Maryland?"
-- System retrieves relevant chunks from 1,077 indexed records
-- Provides answers with source citations and data context
+2. **Clone or Navigate to Repository**
+   ```bash
+   cd ~/Projects
+   cd mental-health-platform-master
+   ```
 
-### 4. AI-Generated Visualizations
+3. **Create Environment File**
+   ```bash
+   cp .env.example .env
+   nano .env  # or use your preferred editor
+   ```
 
-- AI analyzes dataset structure automatically
-- Generates appropriate charts (bar, line, scatter, histogram, heatmap)
-- Provides insights and statistics with each visualization
+   Update the configuration as shown in the Windows section above.
 
-### 5. Data Management
+4. **Start the Platform**
+   ```bash
+   docker-compose up -d
+   ```
 
-- **Ingest**: Download datasets from CDC/SAMHSA/Baltimore
-- **Store**: PostgreSQL metadata + MinIO S3 for parquet files
-- **Index**: Vector embeddings for semantic search
-- **Export**: Download data in various formats
+5. **Verify Installation**
+   ```bash
+   docker-compose ps
+   docker-compose logs backend
+   ```
+
+6. **Access the Applications**
+   - Backend API: http://localhost:8000/docs
+   - MinIO Console: http://localhost:9001
+   - Health Check: http://localhost:8000/health
+
+### Ubuntu Linux
+
+1. **Install Docker Engine and Docker Compose**
+   ```bash
+   # Update package index
+   sudo apt-get update
+
+   # Install prerequisites
+   sudo apt-get install -y ca-certificates curl gnupg lsb-release
+
+   # Add Docker's official GPG key
+   sudo mkdir -p /etc/apt/keyrings
+   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+   # Set up the repository
+   echo \
+     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+     $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+   # Install Docker Engine
+   sudo apt-get update
+   sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+   # Add your user to docker group (to run without sudo)
+   sudo usermod -aG docker $USER
+   newgrp docker  # Or log out and back in
+
+   # Verify installation
+   docker --version
+   docker compose version
+   ```
+
+2. **Navigate to Repository**
+   ```bash
+   cd ~/projects/mental-health-platform-master
+   ```
+
+3. **Create Environment File**
+   ```bash
+   cp .env.example .env
+   nano .env  # or vim, emacs, etc.
+   ```
+
+   Update the configuration as shown in the Windows section above.
+
+4. **Start the Platform**
+   ```bash
+   docker compose up -d
+   ```
+
+5. **Verify Installation**
+   ```bash
+   docker compose ps
+   docker compose logs backend
+   ```
+
+6. **Access the Applications**
+   - Backend API: http://localhost:8000/docs
+   - MinIO Console: http://localhost:9001
+   - Health Check: http://localhost:8000/health
+
+## Running the UI Application
+
+The Streamlit UI is not dockerized by default. To run it:
+
+1. **Install Python Dependencies**
+   ```bash
+   cd ui_app
+   pip install streamlit requests pandas numpy plotly pydeck
+   ```
+
+2. **Configure Backend URL** (if needed)
+   ```bash
+   # Create .env in ui_app directory
+   echo "BACKEND_URL=http://localhost:8000" > .env
+   ```
+
+3. **Start Streamlit**
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+
+4. **Access UI**
+   - Open: http://localhost:8501
 
 ## Usage
 
-### Discover Datasets
+### 1. Search and Ingest Datasets
 
-1. Navigate to **"Discover Data"** tab
-2. Enter a user story:
-   - "I want to analyze youth mental health trends"
-   - "Need data on substance abuse treatment facilities"
-3. Select organization(s): CDC, SAMHSA, Baltimore, or All
-4. Click **"Search for Datasets"**
-5. Browse results, preview data, and download
-
-### Ask Questions (RAG)
-
-1. Navigate to **"Ask Questions"** tab
-2. Enter a question:
-   - "What is the mental health prevalence in Maryland?"
-   - "Show me suicide statistics by county"
-3. System searches indexed data chunks
-4. Returns answer with data sources
-
-### Generate Visualizations
-
-1. Go to **"Visualize Data"** tab
-2. Select an ingested dataset
-3. Click **"Generate AI Visualizations"**
-4. View auto-generated charts and insights
-
-### Ingest New Datasets
-
-Use the backend API:
-
+**Via API:**
 ```bash
-curl -X POST "http://localhost:8000/ingest" \
+# Search CDC catalog
+curl "http://localhost:8000/catalog/search?org=CDC&q=mental%20health"
+
+# Ingest a dataset with auto-indexing for RAG
+curl -X POST http://localhost:8000/ingest \
   -H "Content-Type: application/json" \
   -d '{
     "org": "CDC",
-    "query": "mental health",
-    "auto_index": true,
-    "limit": 5
+    "query": "youth mental health",
+    "auto_index": true
   }'
 ```
 
-## Project Structure
+**Via UI:**
+1. Enter search query (e.g., "depression", "substance abuse")
+2. Select organization (CDC or SAMHSA)
+3. Click "Search Catalog"
+4. Review results and click "Ingest" to store datasets
 
-```
-mental-health-platform/
-├── backend/              # FastAPI application
-│   ├── app/
-│   │   ├── main.py       # API endpoints
-│   │   ├── catalog.py    # Dataset search (Socrata API)
-│   │   ├── semantic.py   # Semantic search with embeddings
-│   │   ├── rag.py        # RAG indexing and retrieval
-│   │   ├── answer.py     # Q&A system
-│   │   ├── viz.py        # AI visualizations
-│   │   ├── baltimore_indexer.py  # Baltimore data integration
-│   │   └── config.py     # Configuration management
-│   └── requirements.txt
-├── ui_app/               # Streamlit frontend
-│   └── streamlit_app.py
-├── infra/                # Infrastructure
-│   ├── init.sql          # Database schema
-│   └── seed_data.sql     # Sample data (optional)
-├── scripts/              # Utility scripts
-│   ├── export/          # Backup and export tools
-│   ├── download/        # Dataset downloaders
-│   ├── index/           # Indexing utilities
-│   ├── ingest/          # Data ingesters
-│   ├── test/            # Test scripts
-│   └── utils/           # General utilities (restore, check status)
-├── backups/              # Data backups (40MB, included in repo)
-│   ├── database_backup.sql  # PostgreSQL dump
-│   ├── minio-data/          # MinIO data files
-│   └── README.md            # Restoration instructions
-├── docs/                 # Documentation
-│   ├── TEAM_SETUP.md        # Team setup guide
-│   ├── BALTIMORE_DATA_SOURCES.md
-│   ├── DEMO.md
-│   └── ...
-├── docker-compose.yml    # Container orchestration
-├── .env.example          # Environment template
-├── .gitignore
-└── README.md             # This file
+### 2. Query with RAG
+
+**Via API:**
+```bash
+# Ask a question about ingested data
+curl -X POST http://localhost:8000/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the trends in youth depression?",
+    "org": "CDC"
+  }'
 ```
 
-## Datasets Included
+**Via UI:**
+1. Navigate to "Ask Questions" tab
+2. Enter your question
+3. View AI-generated answer with source citations
 
-The platform comes with **66+ pre-ingested datasets** and **1,077 indexed chunks** for RAG:
+### 3. Index Datasets for RAG
 
-### CDC (Centers for Disease Control)
-- Mental Health Surveillance System
-- Behavioral Risk Factor Surveillance System (BRFSS)
-- Youth Risk Behavior Survey (YRBSS)
-- Suicide statistics and mortality data
-- Substance abuse indicators
-- Depression and anxiety prevalence
+```bash
+# Index a specific dataset
+curl -X POST http://localhost:8000/index_dataset \
+  -H "Content-Type: application/json" \
+  -d '{
+    "org": "CDC",
+    "uid": "dataset-uid-here",
+    "limit_rows": 5000
+  }'
 
-### SAMHSA (Substance Abuse & Mental Health Services)
-- National Survey on Drug Use and Health (NSDUH)
-- Treatment Episode Data Set (TEDS)
-- Mental health service utilization
-- State-level mental health indicators
-- Treatment facility locator data
+# Batch index all datasets for an organization
+curl -X POST "http://localhost:8000/batch_index?org=CDC"
 
-### Baltimore Open Data
-- Mental health service locations
-- Community health indicators
-- Overdose statistics
-- Social determinants of health
-- Local treatment resources
+# Check indexing status
+curl "http://localhost:8000/rag_status?org=CDC"
+```
+
+### 4. Automated Dataset Discovery
+
+Run the intelligent indexer to automatically discover and ingest mental health datasets:
+
+```bash
+# Ensure OPENAI_API_KEY is set in environment
+export OPENAI_API_KEY=sk-your-key-here
+
+# Run the indexer
+python index_cdc_mental_health_intelligent.py
+```
+
+This script:
+- Uses LLM to generate 100+ diverse mental health search queries
+- Searches CDC catalog for each query
+- Ingests unique datasets automatically
+- Targets 5000+ mental health datasets
 
 ## API Endpoints
 
-### Base URL: `http://localhost:8000`
+### Core Endpoints
+- `GET /health` - Health check
+- `GET /catalog/search` - Search Socrata catalog
+- `POST /ingest` - Ingest dataset from Socrata
+- `GET /datasets` - List ingested datasets
+- `GET /datasets/preview` - Preview dataset from storage
+- `GET /datasets/quick_preview` - Live preview from Socrata
 
-#### Data Discovery
-- `GET /catalog/search?org=CDC&q=mental health` - Search live catalogs
-- `POST /semantic/search` - AI-powered semantic search
-- `GET /datasets?org=All` - List ingested datasets
-- `GET /datasets/preview?org=CDC&uid=abc-123` - Preview dataset
-
-#### RAG/Q&A
-- `POST /answer/ask` - Ask questions about data
-- `GET /rag_status?org=All` - Check indexing status
+### RAG & Search
 - `POST /index_dataset` - Index dataset for RAG
-- `POST /batch_index?org=CDC` - Batch index all datasets
+- `POST /batch_index` - Index all datasets for an org
+- `GET /rag_status` - Check indexing status
+- `DELETE /datasets/{uid}/index` - Remove dataset index
+- `POST /semantic/search` - Semantic search over metadata
+- `POST /answer/query` - Answer questions using RAG
 
-#### Data Management
-- `POST /ingest` - Ingest new dataset
-- `POST /upload_csv` - Upload local CSV file
-- `POST /visualizations/generate` - Generate visualizations
+### Statistics
+- `GET /stats` - System-wide statistics
 
-#### Health & Stats
-- `GET /health` - Service health check
-- `GET /stats` - System statistics
+Full API documentation: http://localhost:8000/docs
 
-**Full API documentation**: http://localhost:8000/docs
+## Management Commands
 
-## Configuration
-
-### Environment Variables
-
-Edit `.env` file with your configuration:
-
+### View Logs
 ```bash
-# Required: OpenAI API key
-OPENAI_API_KEY=sk-proj-your-key-here
-OPENAI_MODEL=gpt-4o-mini
+# All services
+docker-compose logs -f
 
-# Database (defaults work with Docker)
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=mh_catalog
-POSTGRES_USER=app_user
-POSTGRES_PASSWORD=changeme
-
-# MinIO S3 (defaults work with Docker)
-MINIO_ENDPOINT=localhost:9000
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-
-# Optional: Socrata API token (increases rate limits)
-SOCRATA_APP_TOKEN=your-token-here
-SOCRATA_TIMEOUT=20
-
-# Redis (optional, for caching)
-REDIS_URL=redis://localhost:6379/0
+# Specific service
+docker-compose logs -f backend
+docker-compose logs -f postgres
 ```
 
-### Service Ports
-
-- **Backend API**: http://localhost:8000
-- **Backend Docs**: http://localhost:8000/docs
-- **Streamlit UI**: http://localhost:8501
-- **MinIO Console**: http://localhost:9001
-- **PostgreSQL**: localhost:5432
-
-## Team Setup
-
-For team members cloning this repository, see [TEAM_SETUP.md](docs/TEAM_SETUP.md) for detailed setup instructions.
-
-**Quick version:**
+### Restart Services
 ```bash
-git clone https://github.com/sriya19/mental-health-platform.git
-cd mental-health-platform
-git checkout sankarsh-updates
-cp .env.example .env
-# Edit .env and add OPENAI_API_KEY
-docker-compose up -d
-python scripts/utils/restore_data.py
-streamlit run ui_app/streamlit_app.py
+# Restart all
+docker-compose restart
+
+# Restart specific service
+docker-compose restart backend
 ```
 
-## Development
-
-### Run Backend Locally (Without Docker)
-
+### Stop Platform
 ```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+docker-compose down
 ```
 
-### Run Tests
-
+### Stop and Remove Data
 ```bash
-# Test search functionality
-python scripts/test/test_search.py
-
-# Test Baltimore integration
-python scripts/test/test_baltimore_search.py
-
-# Test unified search
-python scripts/test/test_unified_search.py
-
-# Test AI keyword generation
-python scripts/test/test_ai_keywords.py
+docker-compose down -v  # WARNING: Deletes all data!
 ```
 
-### Create Data Backup
-
+### Database Access
 ```bash
-python scripts/export/backup_data.py
+# Connect to PostgreSQL
+docker exec -it pg psql -U app_user -d mh_catalog
+
+# Example queries:
+# \dt                          -- List tables
+# SELECT * FROM datasets;      -- View datasets
+# SELECT COUNT(*) FROM chunks; -- Count indexed chunks
 ```
 
-Creates backups in `backups/` directory:
-- `database_backup.sql` - PostgreSQL dump
-- `minio-data/` - MinIO object files
-
-### Restore Data
-
-```bash
-python scripts/utils/restore_data.py
-```
-
-Restores all datasets and indexed chunks from `backups/` directory.
+### MinIO Access
+1. Open http://localhost:9001
+2. Login with MINIO_ROOT_USER/MINIO_ROOT_PASSWORD
+3. Browse the `mh-raw` bucket
+4. View/download Parquet files
 
 ## Troubleshooting
 
-### "Port already in use"
-
+### Backend Won't Start
 ```bash
-docker-compose down
-# Change ports in docker-compose.yml if needed
-docker-compose up -d
+# Check logs
+docker-compose logs backend
+
+# Common issues:
+# 1. Database not ready - wait 30 seconds and check again
+# 2. Missing .env file - ensure .env exists with all required variables
+# 3. Port 8000 in use - stop other services using this port
 ```
 
-### "Database connection failed"
-
+### Database Connection Errors
 ```bash
-# Verify containers are running
-docker-compose ps
+# Verify PostgreSQL is running
+docker-compose ps postgres
 
-# Check database
-docker-compose exec postgres psql -U app_user -d mh_catalog -c "SELECT COUNT(*) FROM datasets;"
+# Check if database is accepting connections
+docker exec pg pg_isready -U app_user
 
-# Reset database
-docker-compose down -v
-docker-compose up -d
-sleep 30
-python scripts/utils/restore_data.py
+# Restart database
+docker-compose restart postgres
 ```
 
-### "OpenAI API error"
-
-- Verify `OPENAI_API_KEY` is set correctly in `.env`
-- Check key validity at https://platform.openai.com/api-keys
-- Ensure you have API credits available
-- Check rate limits if getting 429 errors
-
-### "No datasets found"
-
+### MinIO Connection Errors
 ```bash
-# Restore data backups
-python scripts/utils/restore_data.py
+# Verify MinIO is running
+docker-compose ps minio
 
-# Or ingest new data
-curl -X POST "http://localhost:8000/ingest" \
-  -H "Content-Type: application/json" \
-  -d '{"org": "CDC", "query": "mental health", "limit": 10}'
+# Check bucket creation
+docker-compose logs create-bucket
+
+# Restart MinIO
+docker-compose restart minio create-bucket
 ```
 
-### "Streamlit won't start"
+### RAG Not Working
+1. Ensure OPENAI_API_KEY is set in .env
+2. Check if datasets are indexed: `curl http://localhost:8000/rag_status?org=CDC`
+3. Index datasets if needed: `curl -X POST http://localhost:8000/batch_index?org=CDC`
+4. Verify OpenAI API quota and billing
 
-```bash
-# Install dependencies
-pip install streamlit requests pandas plotly
+### Port Conflicts
+If ports 8000, 9000, 9001, or 5432 are already in use:
 
-# Check if port 8501 is available
-# On Windows:
-netstat -ano | findstr :8501
-
-# On macOS/Linux:
-lsof -i :8501
+Edit `docker-compose.yml` to change port mappings:
+```yaml
+services:
+  backend:
+    ports:
+      - "8001:8000"  # Change host port (left side) only
 ```
 
-## Performance Notes
+### Out of Memory
+If containers are being killed:
+- Increase Docker memory limit (Docker Desktop → Settings → Resources)
+- Recommended: 4GB minimum, 8GB for large datasets
 
-- **Indexed chunks**: 1,077 data chunks for fast RAG queries
-- **Search latency**: ~2-3 seconds for semantic search across 60+ datasets
-- **API rate limits**:
-  - Socrata: 1,000 requests/hour (10,000 with app token)
-  - OpenAI: Varies by tier (check your limits)
-- **Costs**:
-  - OpenAI: ~$0.01-0.05 per search/visualization request
-  - Storage: Minimal (parquet files are compressed)
+## Configuration Reference
 
-## Data Privacy & Ethics
+### Environment Variables
 
-- All datasets are publicly available government data
-- No personally identifiable information (PII) is stored
-- Data used for research and public health analysis only
-- Complies with CDC and SAMHSA data use agreements
-- OpenAI API calls follow their data usage policies
+#### Required
+- `POSTGRES_USER` - Database username
+- `POSTGRES_PASSWORD` - Database password
+- `POSTGRES_DB` - Database name
+- `MINIO_ROOT_USER` - MinIO admin username
+- `MINIO_ROOT_PASSWORD` - MinIO admin password
+- `OPENAI_API_KEY` - OpenAI API key (for RAG features)
 
-## Contributing
+#### Optional
+- `SOCRATA_APP_TOKEN` - Socrata API token for higher rate limits
+- `OPENAI_MODEL` - LLM model (default: gpt-4o-mini)
+- `OPENAI_BASE_URL` - OpenAI API base URL
+- `S3_BUCKET` - MinIO bucket name (default: mh-raw)
+- `TZ` - Timezone (default: America/New_York)
 
-### For Team Members
+### Data Sources
 
-1. Clone the repository
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Make your changes
-4. Run tests: `python scripts/test/test_*.py`
-5. Commit: `git commit -m "Description"`
-6. Push: `git push origin feature/your-feature`
-7. Create a Pull Request
+- **CDC**: https://data.cdc.gov
+- **SAMHSA**: https://data.samhsa.gov
 
-### Adding New Data Sources
+Both use the Socrata Open Data API (SODA).
 
-1. Add catalog search logic in `backend/app/catalog.py`
-2. Add ingest logic in `backend/app/main.py`
-3. Update tests in `scripts/test/`
-4. Document in `docs/`
+## Development
+
+### Project Structure
+```
+mental-health-platform-master/
+├── backend/                 # FastAPI backend
+│   ├── app/
+│   │   ├── main.py         # API endpoints
+│   │   ├── rag.py          # RAG implementation
+│   │   ├── semantic.py     # Semantic search
+│   │   ├── answer.py       # Q&A module
+│   │   ├── socrata.py      # Socrata API client
+│   │   ├── ingest.py       # Data ingestion
+│   │   ├── db.py           # Database connection
+│   │   ├── llm.py          # LLM integration
+│   │   └── config.py       # Configuration
+│   ├── Dockerfile
+│   └── requirements.txt
+├── ui_app/
+│   └── streamlit_app.py    # Streamlit UI
+├── infra/
+│   └── init.sql            # Database schema
+├── docker-compose.yml      # Docker orchestration
+├── .env.example            # Environment template
+├── index_cdc_mental_health_intelligent.py  # Auto-indexer
+└── README.md
+```
+
+### Adding New Features
+
+1. **Backend API**: Add endpoints in `backend/app/main.py` or create new routers
+2. **Database**: Modify `infra/init.sql` for schema changes
+3. **RAG**: Enhance `backend/app/rag.py` for improved search
+4. **UI**: Update `ui_app/streamlit_app.py` for new interface features
+
+### Running Tests
+```bash
+# Inside backend container
+docker exec -it backend pytest
+```
+
+## Performance Optimization
+
+### Database Tuning
+```sql
+-- Optimize vector search index
+CREATE INDEX IF NOT EXISTS idx_chunks_ivfflat
+ON chunks USING ivfflat (embedding vector_l2_ops)
+WITH (lists = 100);
+
+-- Analyze tables for query planning
+ANALYZE chunks;
+ANALYZE datasets;
+```
+
+### Increase Rate Limits
+1. Register for a Socrata app token: https://dev.socrata.com/docs/app-tokens.html
+2. Add to `.env`: `SOCRATA_APP_TOKEN=your-token`
+
+### Batch Processing
+For large-scale ingestion, use the batch indexer:
+```bash
+python index_cdc_mental_health_intelligent.py
+```
+
+## Security Considerations
+
+1. **Change default passwords** in `.env` before production deployment
+2. **Secure your OpenAI API key** - never commit it to version control
+3. **Use environment variables** for all sensitive configuration
+4. **Enable authentication** if exposing the platform publicly
+5. **Regular backups** of PostgreSQL data volume
+6. **Network isolation** - consider using Docker networks in production
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+See LICENSE file for details.
 
-## Credits
+## Support
 
-**Built by**: Mental Health Data Platform Team
-**Course**: Data Science Capstone
-**Date**: November 2024
+For issues and questions:
+1. Check logs: `docker-compose logs [service]`
+2. Review this README's troubleshooting section
+3. Check API documentation: http://localhost:8000/docs
+4. Verify environment configuration in `.env`
 
 ## Acknowledgments
 
-- **CDC** and **SAMHSA** for providing open data APIs
-- **Baltimore Open Data** for local datasets
-- **OpenAI** for GPT-4o-mini and embeddings
-- **Socrata** for data catalog infrastructure
-- **pgvector** for efficient vector similarity search
-- **MinIO** for S3-compatible object storage
-
-## Contact & Support
-
-For questions, issues, or contributions:
-
-1. **GitHub Issues**: https://github.com/sriya19/mental-health-platform/issues
-2. **Team Lead**: [Your Contact]
-3. **Documentation**: Check the `docs/` folder
-
-## Citation
-
-If you use this platform in your research, please cite:
-
-```bibtex
-@software{mental_health_platform_2024,
-  title = {Mental Health Data Platform: AI-Powered Data Discovery and Analysis},
-  author = {Mental Health Data Platform Team},
-  year = {2024},
-  url = {https://github.com/sriya19/mental-health-platform}
-}
-```
-
----
-
-**Happy analyzing!** If you find this platform useful, please star the repository ⭐ and share with colleagues working in public health and mental health research.
-
-For more information, see:
-- [Team Setup Guide](docs/TEAM_SETUP.md)
-- [Baltimore Data Sources](docs/BALTIMORE_DATA_SOURCES.md)
-- [Demo Guide](docs/DEMO.md)
-- [API Documentation](http://localhost:8000/docs)
+- Data sources: CDC and SAMHSA Socrata Open Data platforms
+- Vector search: pgvector extension for PostgreSQL
+- LLM: OpenAI API for RAG and question answering
+- Storage: MinIO for S3-compatible object storage

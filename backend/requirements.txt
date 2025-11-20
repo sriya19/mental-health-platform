@@ -16,4 +16,3 @@ psycopg[binary,pool]>=3.2
 pandas
 tenacity
 numpy
-lida>=0.0.14

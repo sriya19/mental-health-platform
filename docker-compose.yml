@@ -55,8 +55,6 @@ services:
       context: ./backend
     container_name: backend
     env_file: .env
-    environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
     depends_on:
       postgres:
         condition: service_healthy
