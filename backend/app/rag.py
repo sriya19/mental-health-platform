@@ -77,8 +77,15 @@ async def index_dataset_content(org: str, uid: str, limit_rows: int = 20000) -> 
                 text("DELETE FROM data_chunks WHERE org = :o AND dataset_uid = :u"),
                 {"o": org, "u": uid}
             )
-            
-            # Insert new chunks
+
+            # Fix sequence if it's out of sync (handles re-indexing)
+            conn.execute(text("""
+                SELECT setval('data_chunks_id_seq',
+                    COALESCE((SELECT MAX(id) FROM data_chunks), 0) + 1,
+                    false
+                )
+            """))
+
             # Insert new chunks
             inserted = 0
             for chunk in chunks:
