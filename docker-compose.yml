@@ -1,68 +1,134 @@
 services:
+  # PostgreSQL Database with pgvector extension
   postgres:
-    image: pgvector/pgvector:pg16
     container_name: pg
-    env_file: .env
+    image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-      TZ: ${TZ}
+      POSTGRES_DB: mh_catalog
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_user
     ports:
-      - "${POSTGRES_PORT}:5432"
+      - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./infra/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - mental-health-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U app_user -d mh_catalog"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
 
+  # MinIO Object Storage
   minio:
+    container_name: minio-1
     image: minio/minio:latest
     command: server /data --console-address ":9001"
-    env_file: .env
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "9000:9000"  # API (primary)
+      - "9001:9001"  # Console
     volumes:
-      - minio:/data
+      - minio_data:/data
+    networks:
+      - mental-health-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
+  # Create MinIO bucket on startup
   create-bucket:
+    container_name: create-bucket-1
     image: minio/mc:latest
-    env_file: .env
     depends_on:
-      minio:
-        condition: service_healthy
+      - minio
     entrypoint: >
       /bin/sh -c "
-      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD} &&
-      (mc ls local/${S3_BUCKET} || mc mb local/${S3_BUCKET}) &&
-      tail -f /dev/null
+      sleep 5;
+      /usr/bin/mc config host add minio http://minio-1:9000 minioadmin minioadmin;
+      /usr/bin/mc mb minio/mh-raw --ignore-existing;
+      /usr/bin/mc anonymous set download minio/mh-raw;
+      echo 'MinIO bucket mh-raw created successfully';
+      exit 0;
       "
+    networks:
+      - mental-health-net
 
+  # FastAPI Backend
   backend:
+    container_name: backend
+    image: mental-health-platform:backend
     build:
       context: ./backend
-    container_name: backend
-    env_file: .env
+      dockerfile: Dockerfile
+    environment:
+      # Database connection (use container name 'pg')
+      POSTGRES_HOST: pg
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: mh_catalog
+      POSTGRES_USER: app_user
+      POSTGRES_PASSWORD: app_user
+      
+      # MinIO connection (use container name 'minio-1')
+      S3_ENDPOINT: http://minio-1:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: mh-raw
+      
+      # OpenAI (pass from host .env)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: gpt-4o-mini
+      
+      # Socrata
+      SOCRATA_APP_TOKEN: ${SOCRATA_APP_TOKEN:-}
+    ports:
+      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       minio:
         condition: service_healthy
-    ports:
-      - "8000:8000"
+    networks:
+      - mental-health-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Streamlit UI (optional - uncomment to run in Docker)
+  # streamlit:
+  #   container_name: streamlit-ui
+  #   build:
+  #     context: ./ui_app
+  #     dockerfile: Dockerfile
+  #   environment:
+  #     BACKEND_URL: http://backend:8000
+  #     POSTGRES_HOST: pg
+  #     POSTGRES_PORT: 5432
+  #     POSTGRES_DB: mh_catalog
+  #     POSTGRES_USER: app_user
+  #     POSTGRES_PASSWORD: app_user
+  #   ports:
+  #     - "8501:8501"
+  #   depends_on:
+  #     - backend
+  #   networks:
+  #     - mental-health-net
+  #   restart: unless-stopped
+
+networks:
+  mental-health-net:
+    driver: bridge
 
 volumes:
-  pgdata:
-  minio:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local

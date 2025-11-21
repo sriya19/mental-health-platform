@@ -4,6 +4,31 @@
 venv/
 __pycache__/
 *.pyc
+# Local data
+*.db
+*.sqlite
+*.parquet
+*.log
+minio/
+postgres_data/
+docker-data/
+*.csv
+*.json
+tmp/
+logs/
 
-# Claude Code temp folder
-.claude/
+# Docker and local volumes
+*/data/
+*/volumes/
+node_modules/
+
+# Streamlit cache
+.streamlit/
+.cache/
+
+# OS/system files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
